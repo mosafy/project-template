@@ -1,0 +1,1 @@
+[ERROR | 2022-04-19T17:21:12] Session terminated as the result of an uncaught exception

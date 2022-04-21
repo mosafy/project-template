@@ -1,0 +1,617 @@
+// This close code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// Special credits: ChartArt / Matthew J. Slabosz / Zen & The Art of Trading 
+// Scipt Author: © LucasVivien
+
+//@version=4
+ 
+strategy("MA Bollinger Bands + RSI (Strategy) - Own script", shorttitle="MABB+RSI (Strat)-own", overlay=true, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=100, commission_value=0.1)
+
+
+////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////   INPUTS   ///////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////
+
+
+LongTrades  = input(title="Strategy takes Long trades"  ,type=input.bool ,defval=true  ,group="Trade Directions" ,tooltip="Untick Short trades to trade Longs only")
+ShortTrades = input(title="Strategy takes Short trades" ,type=input.bool ,defval=true  ,group="Trade Directions" ,tooltip="Untick Long trades to trade Shorts only")
+REenterSL   = input(title="Allow Re-Entry after Stops"  ,type=input.bool ,defval=false ,group="Trade Directions" ,tooltip="Allow trade re-entry in same direction (as previous trade) if previous trade's stop loss was hit and new signal occurs.")
+
+SLenable  = input(title="Enable MAE Stop Loss"     ,type=input.bool    ,defval=false ,group="Stop Loss" ,tooltip="Stop set as % of Max Adverse Excursion (Max Drawdown tolerated) // If turned off, the Strategy will trade a certain direction then close and reverse uppon opposite direction entry signal.")
+SLprct    = input(title="Stop Loss Distance"       ,type=input.float   ,defval=5.0   ,group="Stop Loss" ,tooltip="Set stop loss further from closing price by x% of trade entry price.")
+TrailStop = input(title="Enable ATR Trailing Stop" ,type=input.bool    ,defval=false ,group="Stop Loss" ,tooltip="Set stop loss as a trailing stop as a % value of current ATR + Overwrite other Stop Losses.")
+ATRX      = input(title="ATR Multiplier"           ,type=input.float   ,defval=10.0  ,group="Stop Loss" ,tooltip="Increase/decrease to set trailing stop further/closer to trade entry price. Formula = close +/- ATRX * ATR", minval=0.1)
+ATRlen    = input(title="ATR Length"               ,type=input.integer ,defval=14    ,group="Stop Loss" ,tooltip="Average True Range lookback", minval=1)
+
+UseTPprct = input(title="Enable Target Parameter"          ,type=input.bool    ,defval=false ,group="Take Profit" ,tooltip="Set take profit target as a fixed percentage from trade entry price")
+TPprct    = input(title="Take Profit %"                    ,type=input.integer ,defval=10    ,group="Take Profit" ,tooltip="Percentage from entry price to set Take profit targets")
+REenterTP = input(title="Allow Re-Entry after Take Profit" ,type=input.bool    ,defval=false ,group="Take Profit" ,tooltip="Allow trade re-entry in same direction (as previous trade) if previous trade's Take Profit in % was hit and new signal occurs.")
+
+BBX    = input(title="StDev. Multiplier" ,type=input.float   ,defval=2.0   ,group="MABB" ,tooltip="Set upper & lower bounds (BB Price) closer / appart", step=0.01, minval=0.001)
+BBlen  = input(title="StDev. Length"     ,type=input.integer ,defval=200   ,group="MABB" ,tooltip="Standard deviation lookback")
+MAlen  = input(title="MA Length"         ,type=input.integer ,defval=200   ,group="MABB" ,tooltip="Moving average lookback")
+MAtype = input(title="MA Type"           ,type=input.string  ,defval="SMA" ,group="MABB" ,tooltip="Type of moving average used for standard deviation", options=["SMA","EMA","WMA","VWMA","HMA"])
+
+RSINlen = input(title="RSI Cross Loockback " ,type=input.integer ,defval=10    ,group="RSI" ,tooltip="How many bars back (from price crossing-over lower bound or crossing-under upper bound) to look for corresponding RSI neutral crossover/under. Setting to max (1000) is like not taking RSI neutral crosses into account for trade signal detection.", minval=0, maxval=1000) 
+RSIN    = input(title="RSI Neutral"          ,type=input.integer ,defval=50    ,group="RSI" ,tooltip="Defines the level at wich RSI neutral crossover or crossunder occurs. Sometimes, if +/- few points give consistently better results over multiple timeframes, good!")
+RSIlen  = input(title="RSI Length"           ,type=input.integer ,defval=6     ,group="RSI" ,tooltip="Relative Strenght Index lookback")
+
+UseTrend    = input(title="Enable Trend Parameter" ,type=input.bool    ,defval=false ,group="Trend Parameter" ,tooltip="Enable trend paramters: No shorts when price > Trend EMA and no longs when price < Trend EMA")
+TrendEMAlen = input(title="Trend EMA Length"       ,type=input.integer ,defval=375   ,group="Trend Parameter" ,tooltip="Trend EMA lookback. security() called 1H SMA. Eg: 1H SMA 375 = 15m SMA 1500")
+
+UseVol  = input(title="Enable Volatility Parameter" ,type=input.bool    ,defval=false ,group="Volatility" ,tooltip="If turned on, a volatility filter is added to trade signals detection: Strategy will not enter trade during extreme high/expanding volatility.")
+AddVol  = input(title="Additionnal Vol. Visuals"    ,type=input.bool    ,defval=false ,group="Volatility" ,tooltip="Adds additionnal volatility plots lower on the chart scale to visually represent how extreme levels of volatility are defined. To see it along with price chart on same pane, use log scale.")
+BBvolX  = input(title="Vol. Factor"                 ,type=input.float   ,defval=5.0   ,group="Volatility" ,tooltip="Lower to filter out more trades when volatility is high. Setting to max (10) is like not taking Volatility Parameters into account for trade signal detection.", maxval=10, minval=0.1, step=0.1)
+baselen = input(title="Vol. Base Line Length"       ,type=input.integer ,defval=2000  ,group="Volatility" ,tooltip="Base SMA line from wich upper and lower volatility bands (BBvol) are defined.")
+
+UseDateFilter  = input(title="Enable Date Filter"         ,type=input.bool    ,defval=false                               ,group="Date & Time" ,tooltip="Turns on/off date filter")
+StartDate      = input(title="Start Date Filter"          ,type=input.time    ,defval=timestamp("1 Jan 2000 00:00 +0000") ,group="Date & Time" ,tooltip="Date & time to start excluding trades")
+EndDate        = input(title="End Date Filter"            ,type=input.time    ,defval=timestamp("1 Jan 2100 00:00 +0000") ,group="Date & Time" ,tooltip="Date & time to stop excluding trades")
+UseTimeFilter  = input(title="Enable Time Session Filter" ,type=input.bool    ,defval=false                               ,group="Date & Time" ,tooltip="Turns on/off time session filter")
+TradingSession = input(title="Trading Session"            ,type=input.session ,defval="1000-2200:1234567"                 ,group="Date & Time" ,tooltip="No trades will be taken outside of this range")
+
+
+
+////////////////////////////////////////////////////////////////////////////////
+//////////////////////////////////   SIGNALS   ///////////////////////////////// 
+////////////////////////////////////////////////////////////////////////////////
+
+
+//////////////////   Bollinger Bands   ////////////////// 
+
+BBdev    = stdev (close, BBlen) * BBX
+MA       = sma   (close, MAlen)
+if MAtype == "HMA"
+    MA  := hma   (close, MAlen)
+if MAtype == "WMA"
+    MA  := wma   (close, MAlen)
+if MAtype == "EMA"
+    MA  := ema   (close, MAlen)
+if MAtype == "VWMA"
+    MA  := vwma  (close, MAlen)
+
+BBupper = MA + BBdev
+BBlower = MA - BBdev
+BBbull = open < BBlower and close > BBlower
+BBbear = open > BBupper and close < BBupper
+
+
+//////////////////   Relative Strength Index   ////////////////// 
+
+RSI = rsi (close, RSIlen)
+
+RSIcrossover  = crossover (RSI, RSIN)
+RSIcrossunder = crossunder(RSI, RSIN)
+
+RSIbull = false
+for i = 0 to RSINlen
+    if RSIcrossover[i]  == true
+        RSIbull := true
+RSIbear = false
+for i = 0 to RSINlen
+    if RSIcrossunder[i] == true
+        RSIbear := true
+
+
+//////////////////   Volatility   ////////////////// 
+
+BBvol = BBupper - BBlower
+SignalLine = sma(BBvol, 50)
+BaseLine   = sma(BBvol, 2000)
+HighVolLvl = BaseLine + BaseLine * BBvolX/10
+LowVolLvl  = BaseLine - BaseLine * BBvolX/10
+
+var volExtrmHigh = false
+var volExtrmLow = false
+
+if BBvol > HighVolLvl and UseVol
+    volExtrmHigh := true
+else 
+    volExtrmHigh := false
+
+if BBvol < LowVolLvl and UseVol
+    volExtrmLow := true
+else
+    volExtrmLow := false
+
+
+
+//////////////////   Date and Time   ////////////////// 
+
+In(t)      => na(time(timeframe.period, t)) == false
+TimeFilter = (UseTimeFilter and not In(TradingSession)) or not UseTimeFilter
+DateFilter = time >= StartDate and time <= EndDate
+
+DateTime = (UseDateFilter ? not DateFilter : true) and (UseTimeFilter ? In(TradingSession) : true) 
+
+
+
+//////////////////  Trend Following Parameters   ////////////////// 
+
+
+var BullTrend = false
+var BearTrend = false
+var GoLongs = true
+var GoShorts = true
+
+
+    // Trend Definition
+
+TrendEMA = security(syminfo.tickerid, "60", ema(close, TrendEMAlen))
+
+if close > TrendEMA
+    BullTrend := true
+    BearTrend := false
+  
+if close < TrendEMA
+    BearTrend := true
+    BullTrend := false
+
+
+if BullTrend and UseTrend
+    GoShorts := false
+    GoLongs  := true
+if  BearTrend and UseTrend
+    GoLongs  := false
+    GoShorts := true
+
+
+
+//////////////////   Combined validation   ////////////////// 
+
+longsignal  = BBbull and RSIbull and not volExtrmHigh and DateTime
+shortsignal = BBbear and RSIbear and not volExtrmHigh and DateTime
+
+longsignalonly = longsignal and LongTrades
+shortsignalonly = shortsignal and ShortTrades
+
+
+
+
+////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////   STOP LOSSES    ///////////////////////////////   
+////////////////////////////////////////////////////////////////////////////////
+
+
+//////////////////   Determine Signal Direction Change   ////////////////// 
+
+var lastsignalislong  = false 
+var lastsignalisshort = false
+if longsignal 
+    lastsignalislong  := true
+    lastsignalisshort := false
+if shortsignal
+    lastsignalislong  := false
+    lastsignalisshort := true
+
+var newtradedirection = false
+if  lastsignalislong  == true and lastsignalislong[1]  == false 
+ or lastsignalisshort == true and lastsignalisshort[1] == false
+    newtradedirection := true
+else
+    newtradedirection := false
+
+
+//////////////////   Stop losses calculations   ////////////////// 
+
+    // MAE Stop
+    
+LongSL  = close - close * SLprct / 100
+ShortSL = close + close * SLprct / 100
+
+
+    // Trailing Stop
+
+ATR          = atr (ATRlen)
+Stop         = ATRX * ATR
+LongTrailSL  = close - Stop
+ShortTrailSL = close + Stop
+
+
+//////////////////   LSF Identifier   ////////////////// 
+
+var LSF          = 0
+var longSLhit    = false
+var shortSLhit   = false
+
+
+    // Set LSF to Long or Short if new direction
+    
+if (longsignal[1]   and newtradedirection[1] and not UseTrend)
+ or (longsignal[1] and newtradedirection[1] and UseTrend and BullTrend)
+    LSF          := 1
+if (shortsignal[1]  and newtradedirection[1] and not UseTrend)
+ or (shortsignal[1] and newtradedirection[1] and UseTrend and BearTrend)
+    LSF          := -1
+
+
+    // Set LSF to Long or Short if re-entry
+
+if LSF[1]  == 0    and longsignal[1] and REenterSL and not UseTrend
+ or (LSF[1]  == 0 and longsignal[1] and REenterSL and UseTrend and BullTrend)
+    LSF          := 1
+if LSF[1]  == 0    and shortsignal[1] and REenterSL and not UseTrend
+ or (LSF[1]  == 0 and shortsignal[1] and REenterSL and UseTrend and BearTrend)
+    LSF          := -1
+
+
+//////////////////   Stop losses application conditions   ////////////////// 
+
+    // Long Stops
+    
+var LongEntryPrice    = 0.0
+var SLlongsaved       = 0.0 
+var TrailSLlongsaved  = 0.0 
+
+if longsignal  and newtradedirection 
+ or longsignal  and LSF[1] == 0
+    LongEntryPrice := close
+    if SLenable and not TrailStop
+        SLlongsaved  := LongSL 
+    if TrailStop
+        TrailSLlongsaved := LongTrailSL
+if LSF[1] > 0
+    TrailSLlongsaved := max(TrailSLlongsaved[1], close - Stop)
+
+
+    // Short Stops
+    
+var ShortEntryPrice   = 0.0
+var SLshortsaved      = 0.0 
+var TrailSLshortsaved = 0.0 
+
+if shortsignal and newtradedirection
+ or shortsignal and LSF[1] == 0
+    ShortEntryPrice := close
+    if SLenable  and not TrailStop
+        SLshortsaved := ShortSL 
+    if TrailStop
+        TrailSLshortsaved := ShortTrailSL    
+if LSF[1] < 0
+    TrailSLshortsaved := min(TrailSLshortsaved[1], close + Stop)
+
+
+
+//////////////////   SLF conditions after SL hit   ////////////////// 
+
+    // Set LSF to Flat if SL was hit
+    
+if (LSF[1] > 0    and SLenable and not TrailStop  and low  < SLlongsaved)
+ or (LSF[1] > 0 and TrailStop and low  < TrailSLlongsaved)
+ or (LSF[1] > 0 and UseTrend and shortsignal and newtradedirection)
+    LSF          := 0
+if (LSF[1] < 0    and SLenable and not TrailStop  and high > SLshortsaved)
+ or (LSF[1] < 0  and TrailStop and high > TrailSLshortsaved)
+ or (LSF[1] < 0 and UseTrend and longsignal and newtradedirection)
+    LSF          := 0
+
+
+    // Plot where SL was hit 
+    
+if LSF[1] > 0  and LSF == 0
+    longSLhit    := true
+else
+    longSLhit    := false
+if LSF[1] < 0 and LSF == 0
+    shortSLhit   := true
+else
+    shortSLhit   := false    
+
+
+
+//////////////////   Take profit as % of entry price   ////////////////// 
+
+LongTPprct = LongEntryPrice  + LongEntryPrice  * TPprct/100
+ShortTPprct  = ShortEntryPrice - ShortEntryPrice * TPprct/100
+
+var LongTPprctsaved  = 0.0
+var ShortTPprctsaved = 0.0
+var longTPhit  = false
+var shortTPhit = false
+
+if LSF[1] > 0  and UseTPprct
+    LongTPprctsaved := LongTPprct
+else
+    LongTPprctsaved := na
+
+if LSF[1] < 0 and UseTPprct
+    ShortTPprctsaved := ShortTPprct
+else
+    ShortTPprctsaved := na
+
+
+    // Set LSF to Flat if TP was hit
+    
+if (LSF[1] > 0  and UseTPprct and high > LongTPprctsaved)
+    LSF          := 0
+if (LSF[1] < 0  and UseTPprct and low  < ShortTPprctsaved)
+    LSF          := 0
+
+
+    // Set LSF to Long or Short if re-entry
+
+if LSF[1]  == 0    and longsignal[1] and REenterTP
+    LSF          := 1
+if LSF[1]  == 0    and shortsignal[1] and REenterTP
+    LSF          := -1
+
+
+    // Plot where TP was hit 
+    
+if LSF[1] > 0  and LSF == 0 and UseTPprct
+    longTPhit    := true
+else
+    longTPhit    := false
+if LSF[1] < 0 and LSF == 0 and UseTPprct
+    shortTPhit   := true
+else
+    shortTPhit   := false  
+
+
+
+
+////////////////////////////////////////////////////////////////////////////////
+//////////////////////////////////   PLOTS   /////////////////////////////////// 
+////////////////////////////////////////////////////////////////////////////////
+
+
+//////////////////   Signals   //////////////////  (2 are study() specific)
+
+plotchar(longsignal  and not newtradedirection, title="Long Signal" , char='⬆', location=location.belowbar, size=size.tiny, color=#3064fc)
+plotchar(shortsignal and not newtradedirection, title="Short Signal", char='⬇', location=location.abovebar, size=size.tiny, color=#fc1049)
+// plotchar(longsignal and LongTrades and newtradedirection  , title="New Direction Long Signal" , char='⬆', location=location.belowbar, size=size.small, color=#3064fc)
+// plotchar(shortsignal and ShortTrades and newtradedirection, title="New Direction Short Signal", char='⬇', location=location.abovebar, size=size.small, color=#fc1049)
+
+
+//////////////////   Stop Losses   ////////////////// 
+
+    // MAE Stop 
+    
+plot(SLenable and not TrailStop and longsignal  and (newtradedirection or LSF[1] == 0) ? SLlongsaved  : na,
+ title="Long MAE Stop Start" , color=color.red, style=plot.style_linebr, linewidth=6)
+plot(SLenable and not TrailStop and shortsignal and (newtradedirection or LSF[1] == 0) ? SLshortsaved : na,
+ title="Short MAE Stop Start", color=color.red, style=plot.style_linebr, linewidth=6)
+plot(SLenable and not TrailStop  ? SLlongsaved  : na,
+ title="Long MAE Stop" , color= LSF[1] > 0 and SLlongsaved  < LongEntryPrice  ?
+ color.red : LSF[1] > 0  and SLlongsaved  > LongEntryPrice  ? color.green : color.rgb(0,0,0,100), style=plot.style_linebr)
+plot(SLenable and not TrailStop ? SLshortsaved : na,
+ title="Short MAE Stop", color= LSF[1] < 0 and SLshortsaved > ShortEntryPrice ?
+ color.red : LSF[1] < 0 and SLshortsaved < ShortEntryPrice ? color.green : color.rgb(0,0,0,100), style=plot.style_linebr)
+
+
+    // Trailing Stop
+
+plot(TrailStop and longsignal  and (newtradedirection or LSF[1] == 0) ? TrailSLlongsaved  : na,
+ title="Long Trailing Start" , color=color.orange, style=plot.style_linebr, linewidth=6)
+plot(TrailStop and shortsignal and (newtradedirection or LSF[1] == 0) ? TrailSLshortsaved : na,
+ title="Short Trailing Start", color=color.orange, style=plot.style_linebr, linewidth=6)
+plot(TrailStop ? TrailSLlongsaved  : na, title="Long Trailing Stop" ,color= LSF[1] > 0 and TrailSLlongsaved  < LongEntryPrice  ?
+ color.red : LSF[1] > 0  and TrailSLlongsaved  > LongEntryPrice  ? color.green : color.rgb(0,0,0,100))
+plot(TrailStop ? TrailSLshortsaved : na, title="Short Trailing Stop",color= LSF[1] < 0 and TrailSLshortsaved > ShortEntryPrice ?
+ color.red : LSF[1] < 0 and TrailSLshortsaved < ShortEntryPrice ? color.green : color.rgb(0,0,0,100))
+
+
+//     // Plots: SL hit (study() specific, !!! OUTDATED !!!)
+
+// plot(longSLhit and SLenable  and not TrailStop ? SLlongsaved  : longSLhit  and TrailStop ? TrailSLlongsaved  : na,
+//  title="Long SL hit (price)" ,color=#d40df6, style=plot.style_linebr, linewidth=6)
+// plot(shortSLhit and SLenable and not TrailStop ? SLshortsaved : shortSLhit and TrailStop ? TrailSLshortsaved : na,
+//  title="Short SL hit (price)",color=#d40df6, style=plot.style_linebr, linewidth=6)
+// plotchar(longSLhit or  (LongTrades  and not ShortTrades and not longsignal  and newtradedirection),
+//  title="Long SL hit (char)"  ,color=#d40df6, location=location.abovebar, size=size.small, char='⤓')
+// plotchar(shortSLhit or (ShortTrades and not LongTrades  and not shortsignal and newtradedirection), 
+//  title="Short SL hit (char)" ,color=#d40df6, location=location.belowbar, size=size.small, char='⤒')
+
+
+//////////////////   Bollinger Bands   ////////////////// 
+
+plot(MA, title="Moving Average" , color=color.new(color.white, 50))
+PriceUpperLine = plot(BBupper,title="BBprice Upper", color=color.new(color.gray, transp=60))
+PriceLowerLine = plot(BBlower,title="BBprice Lower", color=color.new(color.gray, transp=60))
+fill(PriceUpperLine, PriceLowerLine, title="BBprice Fill", color = 
+ volExtrmHigh and BBvol > BBvol[1] ? color.new(#ff1010, transp=70) : 
+ volExtrmHigh and BBvol < BBvol[1] ? color.new(#ff1010, transp=75) : 
+ volExtrmLow  and BBvol < BBvol[1] ? color.new(#10ff10, transp=70) : 
+ volExtrmLow  and BBvol > BBvol[1] ? color.new(#10ff10, transp=75) : 
+ color.new(color.white, transp=90))
+
+
+//////////////////   Volatility   ////////////////// 
+
+plot(UseVol and AddVol ? BBvol      : na, title="BBvol" ,color=color.new(color.blue, 10))
+plot(UseVol and AddVol ? SignalLine : na, title="Signal Line" ,color=color.new(color.fuchsia, 10))
+plot(UseVol and AddVol ? BaseLine   : na, title="Base Line" ,color=color.new(color.yellow, 10))
+VolUpperLine = plot(UseVol and AddVol ? HighVolLvl : na, title="BBvol Upper" ,color=color.new(color.yellow, 70))
+VolLowerLine = plot(UseVol and AddVol ? LowVolLvl  : na, title="BBvol Lower" ,color=color.new(color.yellow, 70))
+fill(VolUpperLine, VolLowerLine, title="BBvol Fill", color=color.new(color.yellow, transp=98))
+
+
+//////////////////   Date and/or Time exclusion   ////////////////// 
+
+bgcolor(DateFilter and UseDateFilter ? color.rgb(255,70,70,85) : na, title="Date Filter")
+bgcolor(TimeFilter and UseTimeFilter ? color.rgb(255,70,70,85) : na, title="Time Filter")
+
+
+//////////////////   Take Profits   ////////////////// 
+
+plot(LongTPprctsaved , color=color.green, style=plot.style_linebr)
+plot(ShortTPprctsaved, color=color.green, style=plot.style_linebr)
+
+
+//////////////////   Trend EMA   ////////////////// 
+
+plot(UseTrend ? TrendEMA : na, title="Trend EMA" ,color= BullTrend ? #00ff50 : BearTrend ? #ff0050 : na, linewidth=2)
+
+
+////////////////////////////////////////////////////////////////////////////////
+///////////////////////////   STRATEGY ENTRY/EXIT   ////////////////////////////
+////////////////////////////////////////////////////////////////////////////////
+
+
+//////////////////   Longs   ////////////////// 
+
+if longsignalonly and newtradedirection and GoLongs
+    strategy.entry(id="Long"           ,long=true)
+strategy.exit     (id="Long exit1"     ,from_entry="Long",
+ stop  = SLenable and not TrailStop ? SLlongsaved  : TrailStop ? TrailSLlongsaved  : newtradedirection ? BBupper : na,
+ limit =  UseTPprct ? LongTPprctsaved : UseTrend and newtradedirection ? BBupper : na, 
+ when  = LSF[1] > 0)
+
+if longsignalonly and LSF[1] == 0 and (REenterSL or REenterTP) and GoLongs
+    strategy.entry(id="Long after SL"  ,long=true)
+strategy.exit     (id="Long exit2"     ,from_entry="Long after SL",
+ stop  = SLenable and not TrailStop ? SLlongsaved  : TrailStop ? TrailSLlongsaved  : newtradedirection ? BBupper : na,
+ limit =  UseTPprct ? LongTPprctsaved : UseTrend and newtradedirection ? BBupper : na, 
+ when  = LSF[1] > 0)
+
+
+//////////////////   Shorts   ////////////////// 
+
+if shortsignalonly and newtradedirection and GoShorts
+    strategy.entry(id="Short"          ,long=false)
+strategy.exit     (id="Short exit1"    ,from_entry="Short",
+ stop  = SLenable and not TrailStop ? SLshortsaved : TrailStop ? TrailSLshortsaved : newtradedirection ? BBlower : na,
+ limit = UseTPprct ? ShortTPprctsaved : UseTrend and newtradedirection ? BBlower : na,
+ when  = LSF[1] < 0)
+
+if shortsignalonly and LSF[1] == 0 and (REenterSL or REenterTP) and GoShorts
+    strategy.entry(id="Short after SL" ,long=false)
+strategy.exit     (id="Short exit2"    ,from_entry="Short after SL",
+ stop  = SLenable and not TrailStop ? SLshortsaved : TrailStop ? TrailSLshortsaved : newtradedirection ? BBlower : na,
+ limit = UseTPprct ? ShortTPprctsaved : UseTrend and newtradedirection ? BBlower : na,
+ when  = LSF[1] < 0)
+
+
+// ////////////////////////////////////////////////////////////////////////////////
+// //////////////////////////////////   ALERTS   //////////////////////////////////
+// ////////////////////////////////////////////////////////////////////////////////
+
+
+// //////////////////   New trade direction   ////////////////// 
+
+// alertcondition(condition = longsignal  and newtradedirection,
+//  title   = "MABB+RSI Long Signal" ,
+//  message = "{{timenow}} - {{exchange}}:{{ticker}} (TF:{{interval}}) - Price: {{close}} - Close above lower bound & RSI crossover neutral line - TRADE DIRECTION REVERSE FROM SHORT TO LONG")
+// alertcondition(condition = shortsignal and newtradedirection,
+//  title   = "MABB+RSI Short Signal",
+//  message = "{{timenow}} - {{exchange}}:{{ticker}} (TF:{{interval}}) - Price: {{close}} - Close below upper bound & RSI crossunder neutral line - TRADE DIRECTION REVERSE FROM LONG TO SHORT")
+
+
+// //////////////////   SL Hit   ////////////////// 
+
+// alertcondition(condition = longSLhit,
+//  title   = "MABB+RSI Long STOP Activated" ,
+//  message = "{{timenow}} - {{exchange}}:{{ticker}} (TF:{{interval}}) - Price: {{close}} - Low < Long Stop - TRADE HAS BEEN STOPPED")
+// alertcondition(condition = shortSLhit,
+//  title   = "MABB+RSI Short STOP Activated",
+//  message = "{{timenow}} - {{exchange}}:{{ticker}} (TF:{{interval}}) - Price: {{close}} - High > Short Stop - TRADE HAS BEEN STOPPED")
+
+// //////////////////   Re-entry trades   ////////////////// 
+
+// alertcondition(condition = longsignal  and LSF == 0 and REenter, 
+//  title   = "MABB+RSI Long Re-Entry Signal" ,
+//  message = "{{timenow}} - {{exchange}}:{{ticker}} (TF:{{interval}}) - Price: {{close}} - Close above lower bound & RSI crossover neutral line - LONG RE-ENTRY AFTER LAST LONG WAS STOPPED")
+// alertcondition(condition = shortsignal and LSF == 0 and REenter,
+//  title   = "MABB+RSI Short Re-Entry Signal",
+//  message = "{{timenow}} - {{exchange}}:{{ticker}} (TF:{{interval}}) - Price: {{close}} - Close below upper bound & RSI crossunder neutral line - SHORT RE-ENTRY AFTER LAST SHORT WAS STOPPED")
+
+
+// //////////////////   All signals   ////////////////// 
+
+// alertcondition(condition = longsignal ,
+//  title   = "MABB+RSI Long Signal (all)" ,
+//  message = "{{timenow}} - {{exchange}}:{{ticker}} (TF:{{interval}}) - Price: {{close}} - Close above lower bound & RSI crossover neutral line")
+// alertcondition(condition = shortsignal,
+//  title   = "MABB+RSI Short Signal (all)",
+//  message = "{{timenow}} - {{exchange}}:{{ticker}} (TF:{{interval}}) - Price: {{close}} - Close below upper bound & RSI crossunder neutral line")
+
+
+////////////////////////////////////////////////////////////////////////////////
+///////////////////////////   UNUSED CODE & NOTES   ////////////////////////////
+////////////////////////////////////////////////////////////////////////////////
+
+
+//////////////////   User input ////////////////// 
+
+// RSIlvlOB = input(title="RSI Overbough"   ,type=input.integer, defval=70   , group="RSI")
+// RSIlvlOS = input(title="RSI Oversold"    ,type=input.integer, defval=30   , group="RSI")
+
+// // Potential use of latest swing high/low as as base for trailing stop (taken out: not good perf. on all TF)
+// SwingHL  = input(title="Swing H/L as T. Stop base ?",type=input.bool    ,defval=false ,group="Stop Loss" ,tooltip="If turned on, ATR will draw from latest swing high or swing low (within lookback period). If turned off, ATR will draw from trade entry signal closing price")
+// Swinglen = input(title="Swings H/L Lookback"        ,type=input.integer ,defval=10    ,group="Stop Loss" ,tooltip="How many bars back (from trade entry signal) to look for last swing high or swing low", minval=0, maxval=1000)
+    // Indicators
+// SwingHigh= highest(high , Swinglen)
+// SwingLow = lowest (low  , Swinglen)
+
+// // Find use for SMA signal line on BBvol (change hard coded value (50) in plot(SignalLine) if input is back on)
+// signallen = input(title="Vol. Signal Line Length"    ,type=input.integer ,defval=50    ,group="Volatility",tooltip="Does nothing at the moment but might become useful someday ^^")
+
+
+//////////////////   Count Variables ////////////////// 
+
+// // Long and Short SIGNAL count 
+// var longsignalcount = 0
+// var shortsignalcount = 0
+// if longsignal 
+//     longsignalcount := longsignalcount + 1
+// if shortsignal
+//     shortsignalcount := shortsignalcount + 1
+
+// // Long and Short EXIT count 
+// var longexitcount = 0
+// var shortexitcount = 0
+// if LSF[1] == 0 and LSF[1] > 0
+//     longexitcount := longexitcount + 1
+// if LSF[1] == 0 and LSF[1] < 0
+//     shortexitcount := shortexitcount + 1
+
+
+//////////////////   Plot string to chart with labels ////////////////// 
+
+// lblcheck= input(title="Label bar Index"  , type=input.integer , defval=1728)
+// lab1 = label.new(bar_index[lblcheck], close[lblcheck]*1.05, color=color.yellow, text=
+//  "Last signal is LONG: " + tostring(lastsignalislong) + " /// " + "Last signal is SHORT: " + tostring(lastsignalisshort), style=label.style_label_down)
+// if barstate.isrealtime
+//     lab1
+// label.delete(lab1[1])
+// lab2 = label.new(bar_index[lblcheck], close[lblcheck]*.95, color=color.yellow, text=newtradedirection[lblcheck] ? "NEW TRADE DIRECTION" : na, style=label.style_label_up)
+// if barstate.isrealtime
+//     lab2
+// label.delete(lab2[1])
+
+//////////////////   Plot Price bands directions ////////////////// 
+
+// plot(BBupper > BBupper[1] ? 100 : na, color=color.green, style=plot.style_linebr, linewidth=3)
+// plot(BBupper < BBupper[1] ? 100 : na, color=color.red, style=plot.style_linebr, linewidth=3)
+
+// plot(BBlower > BBlower[1] ? 10 : na, color=color.green, style=plot.style_linebr, linewidth=3)
+// plot(BBlower < BBlower[1] ? 10 : na, color=color.red, style=plot.style_linebr, linewidth=3)
+
+// plot(BBvol > BBvol[1] ? 1 : na, color=color.blue, style=plot.style_linebr, linewidth=3)
+// plot(BBvol < BBvol[1] ? 1 : na, color=color.fuchsia, style=plot.style_linebr, linewidth=3)
+
+//// yeah right... ^^ (really need to practice for loops)
+// avgboundsdistance = 0.0
+// avgboundsdistancelookback  = input(title="AVG boud distance lookback",type=input.integer ,defval=10    ,group="MABB"       ,tooltip="", minval=0, maxval=1000) 
+// for i = 0 to avgboundsdistancelookback
+//     avgboundsdistance := (BBupper[i] - BBlower[i])
+// plot(avgboundsdistance)
+
+//////////////////   Plots   ////////////////// 
+
+// // Signals count
+// plot(longsignalcount, color=color.green)
+// plot(shortsignalcount, color=color.red)
+
+// // Trade Exits count
+// plot(longexitcount, color=color.yellow)
+// plot(shortexitcount, color=color.orange)
+
+// // Others
+// plot(sma(close, 500), color=color.fuchsia)
+
+
+// plot(LSF, color=color.fuchsia)
+// plot(strategy.position_size, title="Position_size check")
+
+// ------------------------------------------------------------ CONTRUCTION ZONE ------------------------------------------------------------ //
+// ------------------------------------------------------------ CONTRUCTION ZONE ------------------------------------------------------------ //

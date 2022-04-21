@@ -7,6 +7,7 @@ from jesse.modes.import_candles_mode.drivers.testnet_binance_futures import Test
 from jesse.modes.import_candles_mode.drivers.bybit_perpetual import BybitPerpetual
 from jesse.modes.import_candles_mode.drivers.testnet_bybit_perpetual import TestnetBybitPerpetual
 from jesse.modes.import_candles_mode.drivers.ftx_futures import FTXFutures
+from drivers.kraken import Kraken
 
 import_candles_drivers = {
     'Binance': Binance,
@@ -18,4 +19,5 @@ import_candles_drivers = {
     'Bybit Perpetual': BybitPerpetual,
     'Testnet Bybit Perpetual': TestnetBybitPerpetual,
     'FTX Futures': FTXFutures,
+    'Kraken': Kraken
 }
